@@ -1,0 +1,4 @@
+# Runtime and build dependencies. ASCII only on purpose: pip reads this file
+# with the system code page, so any non-ASCII byte can break parsing.
+customtkinter>=5.2,<7   # window and widgets
+pefile>=2023.2.7        # locating the embedded resource in the PE header
