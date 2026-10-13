@@ -55,8 +55,8 @@ SELF = os.path.abspath(__file__)
 
 
 def texts(fn):
-    """无扩展名的文件（许可证）也要扫。"""
-    return fn.endswith(TEXT_EXT) or '.' not in fn
+    """点文件与无扩展名文件（许可证）同样是文本，必须进扫描范围。"""
+    return fn.endswith(TEXT_EXT) or '.' not in fn or fn.startswith('.')
 
 
 def files(root):
