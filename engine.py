@@ -29,7 +29,8 @@ LEGACY = 'CZ' + 'NSKIN'      # 上一代工具的块标记族，重新出件前�
 PURGE = [r'(?s)/\* ==== (?:SKINRENDER|' + LEGACY + r')-BEGIN[^\n]*==== \*/'
          r'.*?/\* ==== (?:SKINRENDER|' + LEGACY + r')-END[^\n]*==== \*/\n?',
          r'[^\n]*\(function\(\)\{try\{if\(globalThis\._speedLog\)[^\n]*\n?']
-CFG_KEYS = ('off', 'nomap', 'nofu', 'nocreate', 'norow', 'noatl', 'heal', 'tier', 'drop', 'add', 'row')
+CFG_KEYS = ('off', 'nomap', 'nofu', 'nocreate', 'norow', 'noatl', 'heal', 'tier', 'drop', 'add', 'row',
+            'nocardmotion', 'cardmotion')
 
 
 class EngineError(RuntimeError):
@@ -232,7 +233,7 @@ def read_back(src_exe, dst_exe, version, table_text, init_before):
     add('分层表 %d 条已进舱' % n_map, txt.count('"t":"') == n_map)
     add('行覆盖表随表进舱', ('"rows":{"char_base":{"' in txt) == bool(has_rows))
     add('官方行覆盖通道名在内', 'applyClientOverrides' in txt)
-    add('十一个开关名都在', all(k in txt for k in CFG_KEYS))
+    add('运行期开关名齐全', all(k in txt for k in CFG_KEYS))
     add('缺省放行层是 ABTSL', "'ABTSL'" in txt)
     add('摘块后与源逐行全等', a == b and len(a) == len(b))
     add('其余 %d 个 JS 未变' % len(other), all(c1.read(n) == c0.read(n) for n in other))

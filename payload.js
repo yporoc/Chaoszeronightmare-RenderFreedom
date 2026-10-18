@@ -3,7 +3,8 @@
    三条通道，全部查离线生成的分层表，运行时不推断：
      行覆盖 applyClientOverrides / 路径整族重定向（先验目标存在）/ spine 实例观测
    层级 A B T S L M，运行期同目录 skin.cfg 可改：
-     off nomap nofu nocreate norow noatl heal tier drop add row */
+     off nomap nofu nocreate norow noatl heal tier drop add row
+     nocardmotion cardmotion <n>   卡面动画默认强制按已解锁渲染，n 为强制值，默认 1 */
 (function () {
   var BUILD = '@V@';
   var BAKED = __SKIN_TABLE__;
@@ -12,9 +13,9 @@
   var REV = BAKED.revision || 'skinrender-1';
   var ATL = BAKED.atlases || {};
   var ATLKEYS = Object.keys(ATL);
-  var made = { create: 0, fu: 0, hit: 0, refuse: 0, animAsk: 0, animMiss: 0, skinAsk: 0, skinMiss: 0, fail: 0, autooff: 0, rowApplied: 0, rowReadOk: 0, rowReadBad: 0, bridge: 0, heal: 0, atlas: 0 };
+  var made = { create: 0, fu: 0, hit: 0, refuse: 0, animAsk: 0, animMiss: 0, skinAsk: 0, skinMiss: 0, fail: 0, autooff: 0, rowApplied: 0, rowReadOk: 0, rowReadBad: 0, bridge: 0, heal: 0, atlas: 0, cardAsk: 0, cardForced: 0, cardSkip: 0, cardNoGet: 0 };
   var logHit = {}, logRef = {}, animStem = {}, skinStem = {}, extra = {};
-  var cfg = { off: false, nomap: false, nofu: false, nocreate: false, norow: false, noatl: false, tier: 'ABTSL', drop: [], heal: false };
+  var cfg = { off: false, nomap: false, nofu: false, nocreate: false, norow: false, noatl: false, tier: 'ABTSL', drop: [], heal: false, nocardmotion: false, cardmotion: 1 };
   var GOOD = '', LINES = [], REDIR_ON = true, RAW_EXIST = null, FU = null, DBQ = null, TRAP = false, BRIDGEWRAP = false, SURF = null;
   var ROWSTATE = '未开始', ROWLOG = [], SAMPLED = [], BLOCKED = {};
 
@@ -93,6 +94,8 @@
       else if (k === 'norow') { cfg.norow = true; applied.push('norow'); }
       else if (k === 'noatl') { cfg.noatl = true; applied.push('noatl'); }
       else if (k === 'heal') { cfg.heal = true; applied.push('heal'); }
+      else if (k === 'nocardmotion') { cfg.nocardmotion = true; applied.push('nocardmotion'); }
+      else if (k === 'cardmotion' && sp[1]) { cfg.cardmotion = Number(sp[1]) || 0; applied.push('cardmotion=' + cfg.cardmotion); }
       else if (k === 'tier' && sp[1]) { cfg.tier = sp[1]; applied.push('tier=' + sp[1]); }
       else if (k === 'drop' && sp[1]) { cfg.drop.push(sp[1]); applied.push('drop=' + sp[1]); }
       else if (k === 'add' && sp[1] && sp[2]) {
@@ -211,6 +214,59 @@
         return f.apply(globalThis, arguments);
       };
       log('BRIDGE 已包（直通）');
+    }
+
+    /* ---------- 卡面动画 ----------
+       官方 getCardAnimation 从玩家已购清单里取动画号，没买就回 0/undefined，卡面退成静态图。
+       这里只在它回假值、且这张卡确实有动态骨架（card 行的 spine_model 不是 none）时代答——
+       卡面分支只看返回值不查 spine_model，无脑代答会让纯静态卡去加载 card/none.scsp。
+       真值一律原样放行；代答值可由 skin.cfg 的 cardmotion 调。 */
+    var CARD_ARMED = false, CARDGET = null;
+    function hasRig(id) {
+      if (!CARDGET) {
+        var gs = DBQ ? findFns(DBQ, ['get']) : [];
+        if (!gs.length) { if (!made.cardNoGet) log('CARDMOTION 取不到 get ⇒ 一律不代答'); made.cardNoGet++; return false; }
+        CARDGET = gs[0];
+      }
+      try {
+        var row = CARDGET.fn.call(CARDGET.host, 'card', String(id));
+        if (!row || typeof row !== 'object') return false;
+        var s = row.spine_model;
+        return !!s && s !== 'none';                 // 读不到行就不动，宁可不换
+      } catch (e) { return false; }
+    }
+    function wrapCardAnim(host) {
+      if (CARD_ARMED || !host) return;
+      var f = host.getCardAnimation;
+      if (typeof f !== 'function') return;
+      try {
+        host.getCardAnimation = function () {
+          var v = f.apply(this, arguments);
+          made.cardAsk++;
+          if (v) return v;
+          if (!hasRig(arguments[0])) { made.cardSkip++; return v; }
+          made.cardForced++;
+          if (made.cardForced <= 6) log('CARDMOTION 代答 ' + String(arguments[0]) + ' -> ' + cfg.cardmotion);
+          return cfg.cardmotion;
+        };
+        CARD_ARMED = true;
+        log('CARDMOTION 已装（代答值 ' + cfg.cardmotion + '，仅限有 spine_model 的卡）');
+      } catch (e) { log('CARDMOTION 装不上 ' + type_(e)); }
+    }
+    function armCardMotion() {
+      if (cfg.nocardmotion) { log('CARDMOTION 按 cfg nocardmotion 没装'); return; }
+      var pd = null, hold;
+      try { pd = Object.getOwnPropertyDescriptor(globalThis, 'CharacterUtil'); } catch (e) { }
+      hold = (pd && 'value' in pd) ? pd.value : (pd && pd.get ? undefined : globalThis.CharacterUtil);
+      if (hold) wrapCardAnim(hold);
+      try {
+        Object.defineProperty(globalThis, 'CharacterUtil', {
+          configurable: true, enumerable: !(pd && pd.enumerable === false),
+          get: function () { return hold; },
+          set: function (v) { hold = v; wrapCardAnim(v); }
+        });
+        log('CARDMOTION trap=' + (CARD_ARMED ? '已装钩子' : '空位等赋值'));
+      } catch (e) { log('CARDMOTION trap 装不上 ' + type_(e)); }
     }
 
     /* ---------- GameResDB：无条件装 trap；观察与行覆盖都推到第一次 create ---------- */
@@ -362,6 +418,7 @@
       if (didInit) return;
       didInit = true;
       try { armBridge(); } catch (e) { log('BRIDGE 装不上 ' + type_(e)); }
+      try { armCardMotion(); } catch (e) { log('CARDMOTION 装不上 ' + type_(e)); }
       if (DBQ) {
         try {
           var own = Object.keys(DBQ), o = [];
@@ -421,6 +478,7 @@
         try { ap.fn.call(ap.host, { revision: REV + '-off', tables: {} }); return '已清'; } catch (e) { return '清时抛 ' + type_(e); }
       },
       on: function () { REDIR_ON = true; return REDIR_ON; },
+      cardmotion: function () { return { armed: CARD_ARMED, ask: made.cardAsk, forced: made.cardForced, skip: made.cardSkip, v: cfg.cardmotion }; },
       off: function () {
         REDIR_ON = false; dump('off'); flush();
         if (ORIG && !cfg.nocreate && sp.SkeletonAnimation.create !== ORIG) { try { sp.SkeletonAnimation.create = ORIG; } catch (e) { } }
@@ -432,7 +490,8 @@
     for (var kk in M) if (M.hasOwnProperty(kk)) cnt[M[kk].t] = (cnt[M[kk].t] || 0) + 1;
     log('READY 路径表=' + Object.keys(M).length + ' 分层=' + JSON.stringify(cnt) + ' 放行层=' + cfg.tier +
       ' 行覆盖=' + Object.keys(ROWS['char_base'] || {}).length + ' 行 合成图集=' + ATLKEYS.length + ' 条 trap=' + TRAP +
-      ' 图集合成=' + (cfg.tier.indexOf('M') >= 0 ? '开' : '关(官方图集只支持单页)') + ' 自愈回落=' + (cfg.heal ? '开' : '关(皮肤模型常驻)'));
+      ' 图集合成=' + (cfg.tier.indexOf('M') >= 0 ? '开' : '关(官方图集只支持单页)') + ' 自愈回落=' + (cfg.heal ? '开' : '关(皮肤模型常驻)') +
+      ' 卡面动画=' + (cfg.nocardmotion ? '关(跟随已购)' : (CARD_ARMED ? '强制开' : '等赋值')));
     flush();
   } catch (F) { say(BUILD.toUpperCase() + ' FATAL ' + F + ' | ' + String((F && F.stack) || '').split('\n').slice(0, 3).join(' << ')); }
 })();

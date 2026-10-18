@@ -35,7 +35,7 @@ const want = (key, ext) => key.split('/').slice(0, -1).join('/') + '/' + MAP[key
 
 function scenario(cfgText, opts) {
   opts = opts || {};
-  const LOGS = [], INNER = [], CREATED = [], APPLIED = [], ABS = {};
+  const LOGS = [], INNER = [], CREATED = [], APPLIED = [], ABS = {}, CALLS = [];
   const BASE = {};
   IDS.forEach(id => { BASE[String(id)] = { id: Number(id), model: Number(id), portrait_ani: 'none', standing_portrait_ani: 'none' }; });
   const OV = {};
@@ -53,6 +53,7 @@ function scenario(cfgText, opts) {
   const gr = {
     clientOverrides: {},
     get: function (t, k) {
+      if (t === 'card') return opts.cardRow === undefined ? { spine_model: 'unique_1' } : opts.cardRow;
       if (t !== 'char_base') return null;
       const b = BASE[String(k)]; if (!b) return null;
       const o = (OV.char_base || {})[String(k)];
@@ -83,9 +84,21 @@ function scenario(cfgText, opts) {
   vm.createContext(ctx);
   vm.runInContext(RAW, ctx);
   vm.runInContext('GameResDB = __gr', ctx);          // 真机顺序：先跑载荷，DB 之后才被赋值
-  const api = ctx.skinRender;
-  if (api && P_KEY) ctx.sp.SkeletonAnimation.create(P_KEY + '.scsp', 'x', 1);
-  return { ctx, LOGS, INNER, CREATED, APPLIED, api, FU };
+  if (opts.noCardUtil) return finish();
+  ctx.__cu = {
+    getCardAnimation: function (id) {
+      CALLS.push(String(id));
+      return opts.cardOwned === undefined ? 0 : opts.cardOwned;   // 0 = 这角色的卡面动画没买
+    }
+  };
+  vm.runInContext('CharacterUtil = __cu', ctx);      // 赋值即触发载荷装的 trap
+  return finish();
+
+  function finish() {
+    const api = ctx.skinRender;
+    if (api && P_KEY) ctx.sp.SkeletonAnimation.create(P_KEY + '.scsp', 'x', 1);
+    return { ctx, LOGS, INNER, CREATED, APPLIED, api, FU, CALLS };
+  }
 }
 
 const A = scenario('');
@@ -223,8 +236,34 @@ T('D22 表结构自洽', R22 === true,
 T('D23 合成图集缺省不开',
   /图集合成=关/.test(READY) && !/ATLAS 合成/.test(LOG()), READY.slice(0, 130));
 
+/* 卡面动画：官方没买就回 0，这里只在回假值时代答 */
+const CM1 = scenario('');
+const CM1Q = CM1.api.cardmotion();
+T('D24 CharacterUtil 一赋值钩子就装上', CM1Q.armed === true, JSON.stringify(CM1Q));
+const CM1V = CM1.ctx.CharacterUtil.getCardAnimation('c_1057_srt4_rsp5', 1057);
+T('D25 没买的卡被代答成有动画',
+  CM1V === 1 && CM1.api.cardmotion().forced === 1, '返回 ' + CM1V + ' 状态 ' + JSON.stringify(CM1.api.cardmotion()));
+const CM2 = scenario('', { cardOwned: 7 });
+const CM2V = CM2.ctx.CharacterUtil.getCardAnimation('c_30117_uni1', 30117);
+T('D26 已购的真值原样放行', CM2V === 7 && CM2.api.cardmotion().forced === 0,
+  '返回 ' + CM2V + ' 代答次数 ' + CM2.api.cardmotion().forced);
+const CM3 = scenario('nocardmotion' + NL);
+const CM3V = CM3.ctx.CharacterUtil.getCardAnimation('c_1057_srt4_rsp5', 1057);
+T('D27 nocardmotion 时不装也不改行为（负控）',
+  CM3.api.cardmotion().armed === false && CM3V === 0,
+  'armed=' + CM3.api.cardmotion().armed + ' 返回 ' + CM3V);
+const CM4 = scenario('cardmotion 4' + NL);
+T('D28 代答值可由 cfg 调', CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1) === 4,
+  '返回 ' + CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1));
+/* 纯静态卡（spine_model=none）绝不能被代答——卡面分支不查骨架，会去加载 card/none.scsp */
+const CM5 = scenario('', { cardRow: { spine_model: 'none' } });
+const CM5V = CM5.ctx.CharacterUtil.getCardAnimation('c_1069_srt1', 1069);
+const CM5Q = CM5.api.cardmotion();
+T('D29 没有动态骨架的卡不被代答',
+  CM5V === 0 && CM5Q.forced === 0 && CM5Q.skip === 1, JSON.stringify(CM5Q) + ' 返回 ' + CM5V);
+
 const bad = ck.filter(c => !c[1]).length;
-const SHOULD = 23;
+const SHOULD = 29;
 console.log(lines.join(NL));
 console.log(NL + '合计 ' + ck.length + ' 条（应有 ' + SHOULD + '），RED ' + bad);
 process.exit((bad || ck.length !== SHOULD) ? 1 : 0);
