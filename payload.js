@@ -4,7 +4,7 @@
      行覆盖 applyClientOverrides / 路径整族重定向（先验目标存在）/ spine 实例观测
    层级 A B T S L M，运行期同目录 skin.cfg 可改：
      off nomap nofu nocreate norow noatl heal tier drop add row
-     nocardmotion cardmotion <n>   卡面动画默认强制按已解锁渲染，n 为强制值，默认 1 */
+     nocardmotion cardmotion <n>   卡面动画默认强制，<n> 为代答值，默认 1 */
 (function () {
   var BUILD = '@V@';
   var BAKED = __SKIN_TABLE__;
@@ -216,11 +216,7 @@
       log('BRIDGE 已包（直通）');
     }
 
-    /* ---------- 卡面动画 ----------
-       官方 getCardAnimation 从玩家已购清单里取动画号，没买就回 0/undefined，卡面退成静态图。
-       这里只在它回假值、且这张卡确实有动态骨架（card 行的 spine_model 不是 none）时代答——
-       卡面分支只看返回值不查 spine_model，无脑代答会让纯静态卡去加载 card/none.scsp。
-       真值一律原样放行；代答值可由 skin.cfg 的 cardmotion 调。 */
+    /* 卡面动画：官方按已购清单回答，没买回 0；只对有 spine_model 的卡代答，否则纯静态卡会去加载 card/none.scsp */
     var CARD_ARMED = false, CARDGET = null;
     function hasRig(id) {
       if (!CARDGET) {
@@ -232,7 +228,7 @@
         var row = CARDGET.fn.call(CARDGET.host, 'card', String(id));
         if (!row || typeof row !== 'object') return false;
         var s = row.spine_model;
-        return !!s && s !== 'none';                 // 读不到行就不动，宁可不换
+        return !!s && s !== 'none';
       } catch (e) { return false; }
     }
     function wrapCardAnim(host) {

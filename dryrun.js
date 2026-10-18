@@ -236,7 +236,7 @@ T('D22 表结构自洽', R22 === true,
 T('D23 合成图集缺省不开',
   /图集合成=关/.test(READY) && !/ATLAS 合成/.test(LOG()), READY.slice(0, 130));
 
-/* 卡面动画：官方没买就回 0，这里只在回假值时代答 */
+/* 卡面动画：没买回 0，只对有骨架的卡代答 */
 const CM1 = scenario('');
 const CM1Q = CM1.api.cardmotion();
 T('D24 CharacterUtil 一赋值钩子就装上', CM1Q.armed === true, JSON.stringify(CM1Q));
@@ -255,7 +255,6 @@ T('D27 nocardmotion 时不装也不改行为（负控）',
 const CM4 = scenario('cardmotion 4' + NL);
 T('D28 代答值可由 cfg 调', CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1) === 4,
   '返回 ' + CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1));
-/* 纯静态卡（spine_model=none）绝不能被代答——卡面分支不查骨架，会去加载 card/none.scsp */
 const CM5 = scenario('', { cardRow: { spine_model: 'none' } });
 const CM5V = CM5.ctx.CharacterUtil.getCardAnimation('c_1069_srt1', 1069);
 const CM5Q = CM5.api.cardmotion();
