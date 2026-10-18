@@ -12,7 +12,7 @@
   var REV = BAKED.revision || 'skinrender-1';
   var ATL = BAKED.atlases || {};
   var ATLKEYS = Object.keys(ATL);
-  var made = { create: 0, fu: 0, hit: 0, refuse: 0, animAsk: 0, animMiss: 0, skinAsk: 0, skinMiss: 0, fail: 0, autooff: 0, rowApplied: 0, rowReadOk: 0, rowReadBad: 0, bridge: 0, heal: 0, atlas: 0 };
+  var made = { create: 0, fu: 0, hit: 0, refuse: 0, animAsk: 0, animMiss: 0, skinAsk: 0, skinMiss: 0, fail: 0, autooff: 0, rowApplied: 0, rowReadOk: 0, rowReadBad: 0, bridge: 0, heal: 0, atlas: 0, cardAsk: 0, cardForced: 0, cardSkip: 0, cardNoGet: 0 };
   var logHit = {}, logRef = {}, animStem = {}, skinStem = {}, extra = {};
   var cfg = { off: false, nomap: false, nofu: false, nocreate: false, norow: false, noatl: false, tier: 'ABTSL', drop: [], heal: false };
   var GOOD = '', LINES = [], REDIR_ON = true, RAW_EXIST = null, FU = null, DBQ = null, TRAP = false, BRIDGEWRAP = false, SURF = null;
@@ -213,6 +213,54 @@
       log('BRIDGE 已包（直通）');
     }
 
+    /* 卡面动画：官方按已购清单回答，没买回 0；只对有 spine_model 的卡代答，否则纯静态卡会去加载 card/none.scsp */
+    var CARD_ARMED = false, CARDGET = null, CARD_ANSWER = 1;
+    function hasRig(id) {
+      if (!CARDGET) {
+        var gs = DBQ ? findFns(DBQ, ['get']) : [];
+        if (!gs.length) { if (!made.cardNoGet) log('CARDMOTION 取不到 get ⇒ 一律不代答'); made.cardNoGet++; return false; }
+        CARDGET = gs[0];
+      }
+      try {
+        var row = CARDGET.fn.call(CARDGET.host, 'card', String(id));
+        if (!row || typeof row !== 'object') return false;
+        var s = row.spine_model;
+        return !!s && s !== 'none';
+      } catch (e) { return false; }
+    }
+    function wrapCardAnim(host) {
+      if (CARD_ARMED || !host) return;
+      var f = host.getCardAnimation;
+      if (typeof f !== 'function') return;
+      try {
+        host.getCardAnimation = function () {
+          var v = f.apply(this, arguments);
+          made.cardAsk++;
+          if (v || !REDIR_ON) return v;
+          if (!hasRig(arguments[0])) { made.cardSkip++; return v; }
+          made.cardForced++;
+          if (made.cardForced <= 6) log('CARDMOTION 代答 ' + String(arguments[0]) + ' -> ' + CARD_ANSWER);
+          return CARD_ANSWER;
+        };
+        CARD_ARMED = true;
+        log('CARDMOTION 已装（只代答有 spine_model 的卡）');
+      } catch (e) { log('CARDMOTION 装不上 ' + type_(e)); }
+    }
+    function armCardMotion() {
+      var pd = null, hold;
+      try { pd = Object.getOwnPropertyDescriptor(globalThis, 'CharacterUtil'); } catch (e) { }
+      hold = (pd && 'value' in pd) ? pd.value : (pd && pd.get ? undefined : globalThis.CharacterUtil);
+      if (hold) wrapCardAnim(hold);
+      try {
+        Object.defineProperty(globalThis, 'CharacterUtil', {
+          configurable: true, enumerable: !(pd && pd.enumerable === false),
+          get: function () { return hold; },
+          set: function (v) { hold = v; wrapCardAnim(v); }
+        });
+        log('CARDMOTION trap=' + (CARD_ARMED ? '已装钩子' : '空位等赋值'));
+      } catch (e) { log('CARDMOTION trap 装不上 ' + type_(e)); }
+    }
+
     /* ---------- GameResDB：无条件装 trap；观察与行覆盖都推到第一次 create ---------- */
     function armTrap() {
       if (TRAP) return;
@@ -362,6 +410,7 @@
       if (didInit) return;
       didInit = true;
       try { armBridge(); } catch (e) { log('BRIDGE 装不上 ' + type_(e)); }
+      try { armCardMotion(); } catch (e) { log('CARDMOTION 装不上 ' + type_(e)); }
       if (DBQ) {
         try {
           var own = Object.keys(DBQ), o = [];
@@ -421,6 +470,7 @@
         try { ap.fn.call(ap.host, { revision: REV + '-off', tables: {} }); return '已清'; } catch (e) { return '清时抛 ' + type_(e); }
       },
       on: function () { REDIR_ON = true; return REDIR_ON; },
+      cardmotion: function () { return { armed: CARD_ARMED, ask: made.cardAsk, forced: made.cardForced, skip: made.cardSkip, redir: REDIR_ON }; },
       off: function () {
         REDIR_ON = false; dump('off'); flush();
         if (ORIG && !cfg.nocreate && sp.SkeletonAnimation.create !== ORIG) { try { sp.SkeletonAnimation.create = ORIG; } catch (e) { } }
@@ -432,7 +482,8 @@
     for (var kk in M) if (M.hasOwnProperty(kk)) cnt[M[kk].t] = (cnt[M[kk].t] || 0) + 1;
     log('READY 路径表=' + Object.keys(M).length + ' 分层=' + JSON.stringify(cnt) + ' 放行层=' + cfg.tier +
       ' 行覆盖=' + Object.keys(ROWS['char_base'] || {}).length + ' 行 合成图集=' + ATLKEYS.length + ' 条 trap=' + TRAP +
-      ' 图集合成=' + (cfg.tier.indexOf('M') >= 0 ? '开' : '关(官方图集只支持单页)') + ' 自愈回落=' + (cfg.heal ? '开' : '关(皮肤模型常驻)'));
+      ' 图集合成=' + (cfg.tier.indexOf('M') >= 0 ? '开' : '关(官方图集只支持单页)') + ' 自愈回落=' + (cfg.heal ? '开' : '关(皮肤模型常驻)') +
+      ' 卡面动画=' + (CARD_ARMED ? '开' : '等赋值'));
     flush();
   } catch (F) { say(BUILD.toUpperCase() + ' FATAL ' + F + ' | ' + String((F && F.stack) || '').split('\n').slice(0, 3).join(' << ')); }
 })();
