@@ -247,22 +247,19 @@ const CM2 = scenario('', { cardOwned: 7 });
 const CM2V = CM2.ctx.CharacterUtil.getCardAnimation('c_30117_uni1', 30117);
 T('D26 已购的真值原样放行', CM2V === 7 && CM2.api.cardmotion().forced === 0,
   '返回 ' + CM2V + ' 代答次数 ' + CM2.api.cardmotion().forced);
-const CM3 = scenario('nocardmotion' + NL);
+const CM3 = scenario('off' + NL);
 const CM3V = CM3.ctx.CharacterUtil.getCardAnimation('c_1057_srt4_rsp5', 1057);
-T('D27 nocardmotion 时不装也不改行为（负控）',
-  CM3.api.cardmotion().armed === false && CM3V === 0,
-  'armed=' + CM3.api.cardmotion().armed + ' 返回 ' + CM3V);
-const CM4 = scenario('cardmotion 4' + NL);
-T('D28 代答值可由 cfg 调', CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1) === 4,
-  '返回 ' + CM4.ctx.CharacterUtil.getCardAnimation('c_x', 1));
+T('D27 cfg off 时代答也不生效（负控）',
+  CM3.api.cardmotion().armed === true && CM3V === 0 && CM3.api.cardmotion().forced === 0,
+  'armed=' + CM3.api.cardmotion().armed + ' 返回 ' + CM3V + ' 代答次数 ' + CM3.api.cardmotion().forced);
 const CM5 = scenario('', { cardRow: { spine_model: 'none' } });
 const CM5V = CM5.ctx.CharacterUtil.getCardAnimation('c_1069_srt1', 1069);
 const CM5Q = CM5.api.cardmotion();
-T('D29 没有动态骨架的卡不被代答',
+T('D28 没有动态骨架的卡不被代答',
   CM5V === 0 && CM5Q.forced === 0 && CM5Q.skip === 1, JSON.stringify(CM5Q) + ' 返回 ' + CM5V);
 
 const bad = ck.filter(c => !c[1]).length;
-const SHOULD = 29;
+const SHOULD = 28;
 console.log(lines.join(NL));
 console.log(NL + '合计 ' + ck.length + ' 条（应有 ' + SHOULD + '），RED ' + bad);
 process.exit((bad || ck.length !== SHOULD) ? 1 : 0);
