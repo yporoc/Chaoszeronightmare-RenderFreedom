@@ -114,7 +114,7 @@
     var cfgr = readCfg();
     if (cfg.off) REDIR_ON = false;
     say('ALIVE ' + BUILD + ' 目录=' + (GOOD || '无') + ' 路径表=' + Object.keys(M).length +
-      ' 行覆盖=' + Object.keys(ROWS['char_base'] || {}).length + ' cfg:' + cfgr +
+      ' 行覆盖=' + (Object.keys(ROWS['char_base'] || {}).length + rowCardCount()) + ' cfg:' + cfgr +
       ' 改路=' + (REDIR_ON && !cfg.nomap && !cfg.nofu) + ' 包create=' + (!cfg.nocreate));
 
     function shadowProbe() {
@@ -132,7 +132,7 @@
         ' 相对名 isFileExist=' + ex + ' 相对名读回命中=' + (rd.indexOf('SKINSHADOW') >= 0);
     }
     function stemOf(p) {
-      var m = String(p).match(/^(.*?)\/([A-Za-z0-9_.]+)\.(scsp|atlas|sct|srmd|srcs|srue)$/);
+      var m = String(p).match(/^(.*?)\/([A-Za-z0-9_.]+)\.(scsp|atlas|sct|srmd|srcs|srue|brmd)$/);
       return m ? { dir: m[1], stem: m[2], ext: m[3], full: m[1] + '/' + m[2] } : null;
     }
     function atlasFor(p) {
@@ -213,6 +213,49 @@
       log('BRIDGE 已包（直通）');
     }
 
+    /* ---------- GameResDB：无条件装 trap；观察与行覆盖都推到第一次 create ---------- */
+    function armTrap() {
+      if (TRAP) return;
+      var pd = null;
+      try { pd = Object.getOwnPropertyDescriptor(globalThis, 'GameResDB'); } catch (e) { }
+      var hold = (pd && 'value' in pd) ? pd.value : (pd && pd.get ? undefined : globalThis.GameResDB);
+      if (hold) DBQ = hold;
+      try {
+        Object.defineProperty(globalThis, 'GameResDB', {
+          configurable: true, enumerable: !(pd && pd.enumerable === false),
+          get: function () { return hold; },
+          set: function (v) { hold = v; DBQ = v; }
+        });
+        TRAP = true;
+        log('DB trap 装上=' + (typeof globalThis.GameResDB !== 'undefined' ? '可读写' : '空位等赋值') + ' 现值=' + (hold ? '有' : '无'));
+      } catch (e) { log('DB trap 装不上 ' + type_(e)); }
+    }
+    armTrap();
+
+    function dbNames(v) {
+      var seen = {}, list = [], pr = v, lv = 0;
+      while (pr && lv < 4) {
+        var pn;
+        try { pn = Object.getOwnPropertyNames(pr); } catch (e) { break; }
+        for (var i = 0; i < pn.length; i++) if (!seen[pn[i]]) { seen[pn[i]] = 1; list.push(pn[i]); }
+        pr = Object.getPrototypeOf(pr); lv++;
+      }
+      return list;
+    }
+    function findFns(v, nameList) {
+      var names = dbNames(v), pr = v, lv = 0, got = [];
+      while (pr && lv < 4) {
+        for (var q = 0; q < nameList.length; q++) {
+          var want = nameList[q];
+          if (names.indexOf(want) < 0) continue;
+          var f;
+          try { f = pr[want]; } catch (e) { continue; }
+          if (typeof f === 'function') got.push({ host: pr, name: want, fn: f });
+        }
+        pr = Object.getPrototypeOf(pr); lv++;
+      }
+      return got;
+    }
     /* 卡面动画：官方按已购清单回答，没买回 0；只对有 spine_model 的卡代答，否则纯静态卡会去加载 card/none.scsp */
     var CARD_ARMED = false, CARDGET = null, CARD_ANSWER = 1;
     function hasRig(id) {
@@ -261,68 +304,48 @@
       } catch (e) { log('CARDMOTION trap 装不上 ' + type_(e)); }
     }
 
-    /* ---------- GameResDB：无条件装 trap；观察与行覆盖都推到第一次 create ---------- */
-    function armTrap() {
-      if (TRAP) return;
-      var pd = null;
-      try { pd = Object.getOwnPropertyDescriptor(globalThis, 'GameResDB'); } catch (e) { }
-      var hold = (pd && 'value' in pd) ? pd.value : (pd && pd.get ? undefined : globalThis.GameResDB);
-      if (hold) DBQ = hold;
-      try {
-        Object.defineProperty(globalThis, 'GameResDB', {
-          configurable: true, enumerable: !(pd && pd.enumerable === false),
-          get: function () { return hold; },
-          set: function (v) { hold = v; DBQ = v; }
-        });
-        TRAP = true;
-        log('DB trap 装上=' + (typeof globalThis.GameResDB !== 'undefined' ? '可读写' : '空位等赋值') + ' 现值=' + (hold ? '有' : '无'));
-      } catch (e) { log('DB trap 装不上 ' + type_(e)); }
-    }
-    armTrap();
-
-    function dbNames(v) {
-      var seen = {}, list = [], pr = v, lv = 0;
-      while (pr && lv < 4) {
-        var pn;
-        try { pn = Object.getOwnPropertyNames(pr); } catch (e) { break; }
-        for (var i = 0; i < pn.length; i++) if (!seen[pn[i]]) { seen[pn[i]] = 1; list.push(pn[i]); }
-        pr = Object.getPrototypeOf(pr); lv++;
+    /* ---------- 行覆盖：主通道是客户端官方的 applyClientOverrides，兜底才包 get ----------
+       各表的行键类型不一样（char_base 要数字，其它表要原样字符串）。 */
+    function rowKey(tb, id) { return tb === 'char_base' ? Number(id) : id; }
+    /* 逐表的回读判据：卡面行要逐字段相等，不许用子串（子串会把 none 也判成对） */
+    var EXPECT = {
+      char_base: function (row, p) {
+        var want = String(p.portrait_ani || '').split('/').pop();
+        return !!want && (String(row.portrait_ani).indexOf(want) >= 0 ||
+                          String(row.standing_portrait_ani).indexOf(want) >= 0);
+      },
+      card: function (row, p) {
+        return String(row.spine_model) === String(p.spine_model) &&
+               String(row.sct_name) === String(p.sct_name);
       }
-      return list;
-    }
-    function findFns(v, nameList) {
-      var names = dbNames(v), pr = v, lv = 0, got = [];
-      while (pr && lv < 4) {
-        for (var q = 0; q < nameList.length; q++) {
-          var want = nameList[q];
-          if (names.indexOf(want) < 0) continue;
-          var f;
-          try { f = pr[want]; } catch (e) { continue; }
-          if (typeof f === 'function') got.push({ host: pr, name: want, fn: f });
-        }
-        pr = Object.getPrototypeOf(pr); lv++;
-      }
-      return got;
-    }
-    function readBack(id) {
+    };
+    function readBack(tb, id) {
       var gs = findFns(DBQ, ['get']);
-      if (!gs.length) return '取不到 get';
+      if (!gs.length) return { row: null, txt: '取不到 get' };
       try {
-        var row = gs[0].fn.call(gs[0].host, 'char_base', Number(id));
-        if (!row || typeof row !== 'object') return 'get 回来空';
-        return 'portrait_ani=' + String(row.portrait_ani) + ' standing=' + String(row.standing_portrait_ani) + ' model=' + String(row.model);
-      } catch (e) { return 'get 抛 ' + type_(e); }
+        var row = gs[0].fn.call(gs[0].host, tb, rowKey(tb, id));
+        if (!row || typeof row !== 'object') return { row: null, txt: 'get 回来空' };
+        return {
+          row: row,
+          txt: tb === 'card'
+            ? 'spine=' + String(row.spine_model) + ' sct=' + String(row.sct_name)
+            : 'portrait_ani=' + String(row.portrait_ani) + ' standing=' + String(row.standing_portrait_ani)
+      };
+      } catch (e) { return { row: null, txt: 'get 抛 ' + type_(e) }; }
     }
+    function rowCardCount() { return Object.keys(ROWS['card'] || {}).length; }
     function applyRows() {
       if (cfg.norow) { ROWSTATE = 'cfg norow 关闭'; return; }
-      var tb = ROWS['char_base'] || {}, ids = Object.keys(tb);
-      if (!ids.length) { ROWSTATE = '没有要覆盖的行'; return; }
+      var tbs = Object.keys(ROWS).filter(function (t) { return Object.keys(ROWS[t] || {}).length; });
+      if (!tbs.length) { ROWSTATE = '没有要覆盖的行'; return; }
+      var total = 0;
+      tbs.forEach(function (t) { total += Object.keys(ROWS[t]).length; });
       var ap = findFns(DBQ, ['applyClientOverrides'])[0];
       if (ap) {
         try {
-          ap.fn.call(ap.host, { revision: REV, tables: { char_base: tb } });
-          ROWSTATE = '官方 applyClientOverrides 已调用（' + ids.length + ' 行）';
-          log('ROW 走官方通道 ' + ap.name + ' revision=' + REV);
+          ap.fn.call(ap.host, { revision: REV, tables: ROWS });
+          ROWSTATE = '官方 applyClientOverrides 已调用（' + tbs.join('+') + ' ' + total + ' 行）';
+          log('ROW 走官方通道 ' + ap.name + ' revision=' + REV + ' 表=' + tbs.join('+'));
         } catch (e) { ROWSTATE = '官方通道抛 ' + type_(e); log('ROW 官方通道失败 ⇒ 转 get 包装兜底'); }
       }
       if (ROWSTATE.indexOf('已调用') < 0) {
@@ -331,11 +354,12 @@
         var wrapped = {}, gs = findFns(DBQ, ['get', 'getCache', 'getAllCache']);
         gs.forEach(function (g) {
           if (wrapped[g.name]) return; wrapped[g.name] = 1;
-          var oldg = g.fn, tbx = tb;
+          var oldg = g.host[g.name];
           g.host[g.name] = function (table, key) {
-            var row = oldg.apply(g.host, arguments);
+            var row = oldg.apply(this, arguments);
             try {
-              if (table === 'char_base' && row && typeof row === 'object') {
+              var tbx = ROWS[String(table)];
+              if (tbx && row && typeof row === 'object') {
                 var p = tbx[String(key)];
                 if (p) { made.rowApplied++; return Object.assign({}, row, p, { id: row.id }); }
               }
@@ -346,13 +370,20 @@
         });
         if (!gs.length) ROWSTATE = '既没有 applier 也没有可包的 get ⇒ 只剩路径重定向';
       }
-      for (var i = 0; i < ids.length && i < 3; i++) {     /* 只回读 3 条：不在启动期拿表狂问 */
-        var rb = readBack(ids[i]); made.rowApplied++;
-        var want = 'face/portrait/' + tb[ids[i]].portrait_ani.split('/').pop();
-        if (rb.indexOf(want) >= 0) { made.rowReadOk++; ROWLOG.push('OK  char_base[' + ids[i] + '] ' + rb); }
-        else { made.rowReadBad++; ROWLOG.push('RED char_base[' + ids[i] + '] 期望含 ' + want + ' 实得 ' + rb); }
-      }
-      log('ROW 回读(抽样 3) 对=' + made.rowReadOk + ' 不对=' + made.rowReadBad + ' 状态=' + ROWSTATE);
+      /* 回读：每张表各抽 3 条；一张都没验到就是 NOT MEASURED，不许报绿 */
+      var verified = 0;
+      tbs.forEach(function (tb) {
+        var ids = Object.keys(ROWS[tb]);
+        for (var i = 0; i < ids.length && i < 3; i++) {
+          var id = ids[i], bk = readBack(tb, id), p = ROWS[tb][id];
+          made.rowApplied++; verified++;
+          var ex = EXPECT[tb];
+          if (bk.row && ex && ex(bk.row, p)) { made.rowReadOk++; ROWLOG.push('OK  ' + tb + '[' + id + '] ' + bk.txt); }
+          else { made.rowReadBad++; ROWLOG.push('RED ' + tb + '[' + id + '] 实得 ' + bk.txt); }
+        }
+      });
+      ROWSTATE += verified ? ' 回读' + verified + '条' : ' 回读0条(未测)';
+      log('ROW 回读(每表抽 3) 对=' + made.rowReadOk + ' 不对=' + made.rowReadBad + ' 状态=' + ROWSTATE);
       dump('rows');
     }
 
@@ -462,7 +493,9 @@
       made: function () { return { made: made, hit: logHit, refuse: logRef, anim: animStem, skin: skinStem, extra: extra, sampled: SAMPLED, dir: GOOD, cfg: cfg, on: REDIR_ON, rowstate: ROWSTATE, trap: TRAP }; },
       safe: function () { return M; },
       rows: function () { return ROWS; },
+      /* 图集与卡面动画的实况：装了没 / 问过没 / 顶替后的名字被请求过没 */
       atlases: function () { return ATLKEYS; },
+      cardmotion: function () { return { armed: CARD_ARMED, ask: made.cardAsk, forced: made.cardForced, skip: made.cardSkip, redir: REDIR_ON }; },
       reApply: function () { made.rowReadOk = 0; made.rowReadBad = 0; ROWLOG.length = 0; if (!DBQ) return 'DB 还没就位'; applyRows(); return ROWSTATE; },
       clearRows: function () {
         var ap = DBQ ? findFns(DBQ, ['applyClientOverrides'])[0] : null;
@@ -470,7 +503,6 @@
         try { ap.fn.call(ap.host, { revision: REV + '-off', tables: {} }); return '已清'; } catch (e) { return '清时抛 ' + type_(e); }
       },
       on: function () { REDIR_ON = true; return REDIR_ON; },
-      cardmotion: function () { return { armed: CARD_ARMED, ask: made.cardAsk, forced: made.cardForced, skip: made.cardSkip, redir: REDIR_ON }; },
       off: function () {
         REDIR_ON = false; dump('off'); flush();
         if (ORIG && !cfg.nocreate && sp.SkeletonAnimation.create !== ORIG) { try { sp.SkeletonAnimation.create = ORIG; } catch (e) { } }
@@ -481,7 +513,7 @@
     var cnt = {};
     for (var kk in M) if (M.hasOwnProperty(kk)) cnt[M[kk].t] = (cnt[M[kk].t] || 0) + 1;
     log('READY 路径表=' + Object.keys(M).length + ' 分层=' + JSON.stringify(cnt) + ' 放行层=' + cfg.tier +
-      ' 行覆盖=' + Object.keys(ROWS['char_base'] || {}).length + ' 行 合成图集=' + ATLKEYS.length + ' 条 trap=' + TRAP +
+      ' 行覆盖=' + (Object.keys(ROWS['char_base'] || {}).length + rowCardCount()) + ' 行 合成图集=' + ATLKEYS.length + ' 条 trap=' + TRAP +
       ' 图集合成=' + (cfg.tier.indexOf('M') >= 0 ? '开' : '关(官方图集只支持单页)') + ' 自愈回落=' + (cfg.heal ? '开' : '关(皮肤模型常驻)') +
       ' 卡面动画=' + (CARD_ARMED ? '开' : '等赋值'));
     flush();

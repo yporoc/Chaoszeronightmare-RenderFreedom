@@ -86,7 +86,7 @@ def require_assets():
     if BEGIN % VER_TOKEN not in payload:
         raise EngineError('payload.js 的块标记不对，出件后无法判定是哪一块在跑')
     return {'table': txt, 'counts': counts, 'payload': payload,
-            'rows': len(table['rows'].get('char_base', {})),
+            'rows': sum(len(v) for v in table['rows'].values()),
             'entries': len(table['map'])}
 
 
@@ -292,9 +292,10 @@ def detect(exe_path, table_path=None, payload_path=None, manifest=None, log=prin
     if table_path:
         txt, table, counts = load_table(table_path)
         table_info = {'text': txt, 'table': table, 'counts': counts}
-        add('分层表', True, '%d 条，分 %s；行覆盖 %d 条' % (
+        add('分层表', True, '%d 条，分 %s；行覆盖 %s' % (
             len(table['map']), ' '.join('%s%d' % (k, counts[k]) for k in sorted(counts)),
-            len(table['rows'].get('char_base', {}))))
+            ' '.join('%s%d' % (k, len(v)) for k, v in sorted(table['rows'].items()) if v)
+            or '无'))
         bad = [k for k, m in table['map'].items() if not m['e'] or '/' not in k]
         quiet('分层表形状', not bad, '%d 条不完整' % len(bad))
     payload_info = None
@@ -331,7 +332,7 @@ def manifest_check(table, manifest_path, add):
         add('资源清单', False, '找不到 %s' % os.path.basename(manifest_path))
         return {}
     data = open(manifest_path, 'rb').read()
-    blob = re.findall(rb'[a-z0-9_]+(?:/[a-zA-Z0-9_]+)+\.(?:scsp|atlas|sct|srmd|srcs|srue)', data)
+    blob = re.findall(rb'[a-z0-9_]+(?:/[a-zA-Z0-9_]+)+\.(?:scsp|atlas|sct|srmd|srcs|srue|opt|brmd)', data)
     have = set(x.decode() for x in blob)
     if not have:
         add('清单可解析', False, '扫不出资源路径，清单格式和预期不符')
@@ -345,7 +346,103 @@ def manifest_check(table, manifest_path, add):
     miss = sorted(x for x in need if x not in have)
     add('目标文件在盘上', not miss, '%d 个全在' % len(need) if not miss
         else '缺 %d/%d 个（%s）' % (len(miss), len(need), ', '.join(miss[:2])))
-    return {'need': len(need), 'missing': miss}
+    # 附加页闸：本体另有 <stem>_am.sct / <stem>.opt 而变体没有时，本体的附加页矩形会压到皮肤的页上。
+    # 豁免：同一条皮肤连 model_data 一起换成同一变体（动画命令表跟着换）时实测不出这种色块，放行。
+    orphan, exempt = [], []
+    for key, m in table['map'].items():
+        d, base = key.rsplit('/', 1)
+        md = table['map'].get('model_data/' + base)
+        paired = bool(md and md.get('v') == m['v'] and 'srmd' in md.get('e', []))
+        for suf in ('_am.sct', '.opt'):
+            src = '%s/%s%s' % (d, base, suf)
+            dst = '%s/%s%s' % (d, m['v'], suf)
+            if src in have and dst not in have:
+                (exempt if paired else orphan).append(src)
+    add('本体附加页有对应', not orphan,
+        ('无孤立附加页' if not orphan else
+         '这些条目要摘掉重定向，盘上没有对应的变体附加页：%s' % ', '.join(orphan[:3]))
+        + ('；另有 %d 条因连 model_data 同变体而豁免：%s' % (len(exempt), ', '.join(exempt[:3]))
+           if exempt else ''))
+    # 小人换装闸。局内的美术和动画命令表是同一个名字要来的（battle_stage.js 两处 load 都走
+    # CombatantSkinUtil.getBattleModel），只换 model/ 不换 model_data/ 时，本体命令表要
+    # attack_ready/hit/... 而变体骨架里只有 move/stop，isExistAnimation 全落空，
+    # 于是角色停在摆放姿态 = 正面站立毫无动作。反编译实测：变体只有带自己的 .srcs 才是完整一套
+    # （官方闸门 getBattleSkin 对 SPECIAL 也同样要求 .srcs）。_battle_ready 例外，
+    # animation_node.js 见到名字含 _battle_ready 就不加载命令表。
+    rig, rig_exempt, rig_pair_bad = [], [], []
+    for key, m in sorted(table['map'].items()):
+        if not key.startswith('model/') or key.endswith('_battle_ready'):
+            continue
+        base = key[len('model/'):]
+        md = table['map'].get('model_data/' + base)
+        if not md or md.get('v') != m['v']:
+            rig_pair_bad.append('%s->%s（model_data/%s %s）'
+                                % (key, m['v'], base, '缺行' if not md else '目标是 ' + str(md.get('v'))))
+            continue
+        lack = [x for x in ('srmd', 'srcs') if x not in md.get('e', [])]
+        if lack:
+            rig.append('%s->%s（配对行没列 %s，命令表还是本体的）' % (key, m['v'], '/'.join(lack)))
+        elif 'model_data/%s.srcs' % m['v'] not in have:
+            (rig_exempt if m.get('x') else rig).append('%s->%s（容器里没有 model_data/%s.srcs）'
+                                                       % (key, m['v'], m['v']))
+    for key, m in sorted(table['map'].items()):
+        if key.startswith('model_data/') and not key.endswith('_battle_ready'):
+            base = key[len('model_data/'):]
+            if ('model/' + base) not in table['map']:
+                rig_pair_bad.append('%s->%s（model/%s 缺行）' % (key, m['v'], base))
+    add('小人换装带同变体命令表', not rig and not rig_pair_bad,
+        ('%d 条 model/ 换装都配了同变体的 model_data/（srmd+srcs 都在行里且都在盘上）'
+         % len([k for k in table['map'] if k.startswith('model/')]) if not rig and not rig_pair_bad else
+         ('这些条目换了小人骨架但命令表还是本体的，局内只能停在摆放姿态：%s' % ', '.join(rig[:3])
+          if rig else '')
+         + ('；配对不完整：%s' % ', '.join(rig_pair_bad[:3]) if rig_pair_bad else ''))
+        + ('；豁免 %d 条：%s' % (len(rig_exempt), ', '.join(rig_exempt[:3]) if rig_exempt else '无')
+           if rig_exempt else ''))
+    # 行顶替给出的卡面美术名，客户端是按 card/ 与 card_illustration/ 前缀直接去要的
+    # （实测参照系：card 表 202 个 spine_model 全部在 card/ 有 .scsp，effect/ 一个都没有），
+    # 所以名字必须能在盘上落地，否则等于让客户端去请求一个不存在的文件。
+    bad_names = []
+    card_rows = (table.get('rows') or {}).get('card') or {}
+    for cid, p in card_rows.items():
+        sm = p.get('spine_model')
+        if sm and sm != 'none' and ('card/%s.scsp' % sm) not in have:
+            bad_names.append('%s→card/%s.scsp' % (cid, sm))
+        sn = p.get('sct_name')
+        if sn and sn != 'none' and ('card_illustration/%s.sct' % sn) not in have:
+            bad_names.append('%s→card_illustration/%s.sct' % (cid, sn))
+    add('卡面行顶替的目标名可解析', not bad_names,
+        '%d 条都能在盘上落地' % len(card_rows)
+        if not bad_names else '这些名字客户端要到但盘上没有：%s' % ', '.join(bad_names[:3]))
+    # 同一角色的皮肤号必须全局同一个。脸族是 `face/character/<族名>_<token>` 一类族名各自独立地
+    # 按同一个 token 拼出来的（反编译 game/character_model.js 的 getFaceByToken：
+    # token = model_number 或 char_base.model），所以一个角色只能有一套皮肤在被顶；
+    # 若某族指 _01、别的族指 _02，玩家就会在编队/聊天那一屏看到"脸和身体不是同一套皮肤"。
+    # 卡面族（card/ 与 card_illustration/ 的 _NN 是卡面序号）不参与这条判断。
+    SKIN_DIRS = ('face/character', 'face/portrait', 'model', 'model_data')
+    byc = {}
+    for key, m in table['map'].items():
+        d, base = key.rsplit('/', 1)
+        if d not in SKIN_DIRS:
+            continue
+        mv = re.match(r'^(.*?)(\d{3,7})(?:_(\d{2}))?$', str(m.get('v') or ''))
+        if not mv or not mv.group(3):
+            continue                      # 没带皮肤号 = 顶到本体号，不参与统一性判定
+        byc.setdefault(mv.group(2), {}).setdefault(d, set()).add(mv.group(3))
+    clash = []
+    for cid in sorted(byc):
+        nums = set()
+        for exts in byc[cid].values():
+            nums |= exts
+        if len(nums) > 1:
+            clash.append('%s 用了 %s（%s）' % (cid, '/'.join(sorted('_' + n for n in nums)),
+                            ', '.join('%s:%s' % (d, '/'.join(sorted(v)))
+                                      for d, v in sorted(byc[cid].items()))))
+    add('同一角色的皮肤号全局一致', not clash,
+        '%d 个角色的皮肤号各自统一' % len(byc) if not clash
+        else '这些角色的族与族之间皮肤号不一致：%s' % '; '.join(clash[:3]))
+    return {'need': len(need), 'missing': miss, 'orphan_extra': orphan, 'orphan_exempt': exempt,
+            'card_names': bad_names, 'rig_no_srcs': rig, 'rig_pair_bad': rig_pair_bad,
+            'rig_exempt': rig_exempt}
 
 
 def produce(src_exe, dst_exe, table_path, payload_path, version=None, manifest=None, log=print):
@@ -389,7 +486,7 @@ def produce(src_exe, dst_exe, table_path, payload_path, version=None, manifest=N
              'out': os.path.basename(dst_exe), 'out_sha256': summ['sha_dst'],
              'out_size': summ['size'], 'table_sha256': sha16(table_path),
              'payload_sha256': sha16(payload_path), 'entries': counts,
-             'rows': len(det['table']['table']['rows'].get('char_base', {})),
+             'rows': sum(len(v) for v in det['table']['table']['rows'].values()),
              'padding_left': summ['padding_left'], 'init_js': {'orig': info['orig'], 'new': info['new']},
              'anchor_line': info['anchor_line'], 'window': list(info['window']),
              'checks': {nm: bool(ok) for nm, ok in checks}, 'seconds': round(time.time() - t0, 1)}
@@ -473,4 +570,137 @@ def gate_selftest(table_path=None, payload_path=None):
     finally:
         if os.path.exists(tmp_same):
             os.remove(tmp_same)
+
+    def mcheck(variant_ready, with_md=None):
+        """孤立附加页的对照：同一张表，只改"变体的附加页在不在盘上"和有没有 model_data 配对。"""
+        paths = ['model/30084.scsp', 'model/30084.atlas', 'model/30084.sct',
+                 'model/30084.opt', 'model/30084_am.sct',
+                 'model/30084_01.scsp', 'model/30084_01.atlas', 'model/30084_01.sct']
+        if variant_ready:
+            paths += ['model/30084_01_am.sct', 'model/30084_01.opt']
+        mp = {'model/30084': {'v': '30084_01', 't': 'L', 'e': ['scsp', 'atlas', 'sct']}}
+        if with_md:
+            mp['model_data/30084'] = {'v': with_md, 't': 'S', 'e': ['srmd']}
+        p = os.path.join(os.environ.get('TEMP', '.') or '.', 'skinrender-manifest.bin')
+        got = []
+        io.open(p, 'wb').write(' '.join(paths).encode())
+        try:
+            manifest_check({'map': mp}, p, lambda nm, ok, why: got.append((nm, ok, why)))
+        finally:
+            os.remove(p)
+        return {n: ok for n, ok, _ in got}, [w for n, ok, w in got if not ok]
+    try:
+        bad, badwhy = mcheck(False)
+        out.append(('孤立附加页要拒绝', bad.get('本体附加页有对应') is False,
+                    '没拦下来，这条目会画成全身色块' if bad.get('本体附加页有对应') is not False
+                    else '拦下：%s' % ' '.join(badwhy)))
+        good, _ = mcheck(True)
+        out.append(('附加页齐备时不误杀',
+                    good.get('本体附加页有对应') is True and good.get('目标文件在盘上') is True,
+                    ' '.join('%s=%s' % (n, ok) for n, ok in good.items())))
+        exm, exmwhy = mcheck(False, '30084_01')
+        out.append(('model_data 同变体时豁免', exm.get('本体附加页有对应') is True,
+                    '豁免失效：%s' % ' '.join(exmwhy) if exm.get('本体附加页有对应') is not True
+                    else '豁免但仍需在文案里点名，防静默放行'))
+        dif, difwhy = mcheck(False, '30084_99')
+        out.append(('model_data 换了别的变体仍要拒绝', dif.get('本体附加页有对应') is False,
+                    '配对判据过宽，已放行不同变体' if dif.get('本体附加页有对应') is not False
+                    else '拦下：%s' % ' '.join(difwhy)))
+
+        def rcheck(case):
+            """小人换装闸的对照：同一套盘上文件，只改表里怎么配对、变体 .srcs 在不在。"""
+            paths = ['model/30084.scsp', 'model/30084.atlas', 'model/30084.sct',
+                     'model/30084_01.scsp', 'model/30084_01.atlas', 'model/30084_01.sct',
+                     'model_data/30084.srmd', 'model_data/30084.srcs',
+                     'model_data/30084_01.srmd', 'model_data/30084_01.srcs',
+                     'model/30134_battle_ready.scsp', 'model/30134_02_battle_ready.scsp',
+                     'model_data/30134_battle_ready.brmd', 'model_data/30134_02_battle_ready.brmd']
+            md = {'v': '30084_01', 't': 'S', 'e': ['srmd', 'srcs']}
+            mp = {'model/30084': {'v': '30084_01', 't': 'L', 'e': ['scsp', 'atlas', 'sct']}}
+            if case == 'nopair':
+                md = None
+            elif case == 'nosrcs':
+                md = {'v': '30084_01', 't': 'S', 'e': ['srmd']}
+            elif case == 'othervar':
+                md = {'v': '30084_02', 't': 'S', 'e': ['srmd', 'srcs']}
+            elif case == 'brmdonly':
+                mp = {'model/30134_battle_ready': {'v': '30134_02_battle_ready', 't': 'A',
+                                                   'e': ['scsp', 'atlas', 'sct']},
+                      'model_data/30134_battle_ready': {'v': '30134_02_battle_ready', 't': 'S',
+                                                        'e': ['brmd']}}
+                md = None
+            if md is not None:
+                mp['model_data/30084'] = md
+            if case == 'srcsmissing':
+                paths = [x for x in paths if x != 'model_data/30084_01.srcs']
+            p = os.path.join(os.environ.get('TEMP', '.') or '.', 'skinrender-rig.bin')
+            got = {}
+            io.open(p, 'wb').write(' '.join(paths).encode())
+            try:
+                manifest_check({'map': mp}, p, lambda nm, ok, why: got.setdefault(nm, (ok, why)))
+            finally:
+                os.remove(p)
+            return got.get('小人换装带同变体命令表', (None, '闸没跑到'))
+
+        for case, nm in (('nopair', '小人换装缺 model_data 配对要拒绝'),
+                         ('nosrcs', '只配 srmd 不配 srcs 仍要拒绝'),
+                         ('othervar', '配对指向别的变体要拒绝'),
+                         ('srcsmissing', '变体 .srcs 不在盘上要拒绝')):
+            ok, why = rcheck(case)
+            out.append((nm, ok is False, '没拦下来，局内小人会停在摆放姿态'
+                        if ok is not False else '拦下：%s' % why))
+        ok, why = rcheck('paired')
+        out.append(('成对且变体带 srcs 时不误杀', ok is True, ' '.join(
+            ['%s=%s' % (ok, why)] if ok is not True else ['30084 这一套放行正常'])))
+        ok, why = rcheck('brmdonly')
+        out.append(('背身件不要求命令表配对', ok is True, '误杀了 _battle_ready：%s' % why
+                    if ok is not True else '按 animation_node 的 _battle_ready 分支放行'))
+
+        def ucheck(same):
+            """族与族之间皮肤号是否统一的对照：同一角色两条行，号一致 / 号差一个。"""
+            n = '01' if same else '02'
+            mp = {'face/character/face_character_40001':
+                  {'v': 'face_character_40001_01', 't': 'T', 'e': ['sct']},
+                  'face/portrait/40001': {'v': '40001_' + n, 't': 'A', 'e': ['scsp', 'atlas', 'sct']}}
+            paths = ['face/character/face_character_40001_01.sct',
+                     'face/portrait/40001_01.scsp', 'face/portrait/40001_01.atlas',
+                     'face/portrait/40001_01.sct',
+                     'face/portrait/40001_02.scsp', 'face/portrait/40001_02.atlas',
+                     'face/portrait/40001_02.sct']
+            p = os.path.join(os.environ.get('TEMP', '.') or '.', 'skinrender-uniform.bin')
+            got = {}
+            io.open(p, 'wb').write(' '.join(paths).encode())
+            try:
+                manifest_check({'map': mp}, p, lambda nm, ok, why: got.setdefault(nm, (ok, why)))
+            finally:
+                os.remove(p)
+            return got.get('同一角色的皮肤号全局一致', (None, '闸没跑到'))
+
+        ok, why = ucheck(False)
+        out.append(('同角色两族号不同要拒绝', ok is False,
+                    '没拦下来，编队那屏会脸和身体两套皮肤' if ok is not False else '拦下：%s' % why))
+        ok, why = ucheck(True)
+        out.append(('同角色两族号一致不误杀', ok is True, '误杀：%s' % why if ok is not True else '一致放行'))
+
+        def ccheck(spinename):
+            """卡面行顶替目标名的对照：给一个盘上有的名字，再给一个盘上没有的名字。"""
+            txt = ('card/known_rig.scsp card/known_rig.atlas card/known_rig.sct '
+                   'card_illustration/known_art.sct').encode()
+            p = os.path.join(os.environ.get('TEMP', '.') or '.', 'skinrender-cardname.bin')
+            got = {}
+            io.open(p, 'wb').write(txt)
+            try:
+                manifest_check({'map': {}, 'rows': {'card': {'c_x': {'spine_model': spinename,
+                                                                      'sct_name': 'none'}}}},
+                               p, lambda nm, ok, why: got.setdefault(nm, ok))
+            finally:
+                os.remove(p)
+            return got.get('卡面行顶替的目标名可解析')
+        out.append(('卡面行目标名盘上没有要拒绝', ccheck('ghost_rig') is False,
+                    '放行了一个客户端会请求但不存在的骨架名' if ccheck('ghost_rig') is not False
+                    else '拦下 ghost_rig'))
+        out.append(('卡面行目标名盘上有则不误杀', ccheck('known_rig') is True,
+                    'good=%s' % ccheck('known_rig')))
+    except Exception as e:
+        out.append(('孤立附加页闸自检', False, '闸自己坏了 %s：%s' % (type(e).__name__, e)))
     return out

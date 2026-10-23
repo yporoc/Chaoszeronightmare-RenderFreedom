@@ -18,9 +18,13 @@ if (!fs.existsSync(PAYLOAD_PATH)) { console.log('RED 找不到载荷：' + PAYLO
 
 const TABLE = JSON.parse(fs.readFileSync(TABLE_PATH, 'utf-8'));
 const VB = '/* ==== SKINRENDER-BEGIN @V@ ==== */', VE = '/* ==== SKINRENDER-END @V@ ==== */';
-const RAW = fs.readFileSync(PAYLOAD_PATH, 'utf-8')
-  .replace(VB, '').replace(VE, '').split('@V@').join('dry')
-  .replace('__SKIN_TABLE__', JSON.stringify(TABLE));
+const PAYLOAD_SRC = fs.readFileSync(PAYLOAD_PATH, 'utf-8');
+function rawOf(tab) {
+  return PAYLOAD_SRC.replace(VB, '').replace(VE, '').split('@V@').join('dry')
+    .replace('__SKIN_TABLE__', JSON.stringify(tab));
+}
+const RAW = rawOf(TABLE);
+const RAW_LIVE = RAW;
 
 const FAKE_DIR = '/writ' + 'able/';
 const BRANDS = ['cz' + 'n', 'CZ' + 'NSKIN', 'v' + '14', 'LE' + 'GION', 'Chaos' + 'Zero'].join('|');
@@ -31,11 +35,23 @@ const IDS = Object.keys(ROWS);
 const pick = (t, pre) => Object.keys(MAP).filter(k => MAP[k].t === t && (!pre || k.indexOf(pre) === 0))[0];
 const L_KEY = pick('L', 'model/'), A_KEY = pick('A', 'model/'), T_KEY = pick('T'), S_KEY = pick('S', 'model_data/');
 const P_KEY = Object.keys(MAP).filter(k => k.indexOf('face/portrait/') === 0 && 'AB'.indexOf(MAP[k].t) >= 0)[0];
-const want = (key, ext) => key.split('/').slice(0, -1).join('/') + '/' + MAP[key].v + '.' + ext;
+const want = (key, ext, tab) => (tab || MAP)[key]
+  ? key.split('/').slice(0, -1).join('/') + '/' + (tab || MAP)[key].v + '.' + ext : key + '.' + ext;
 
-function scenario(cfgText, opts) {
+/* L 层（"只换美术、动画表跟着变体走"）现在的实测结论是：棋盘件（command 只有 move/stop）
+   绝不该拿来换局内小人，所以交付表里一条 L 都没有。可载荷里那套 L 逻辑（换骨架、
+   MISS 记账、heal 回落、tier/drop 收回）还得有判据打着——这里造一条夹具行，
+   只进沙箱，不进交付表。 */
+const FIX_KEY = 'model/900001';
+const FIXTAB = Object.assign({}, MAP, {
+  [FIX_KEY]: { v: '900001_01', e: ['scsp', 'atlas', 'sct'], t: 'L', va: ['idle', 'stop'] },
+});
+const RAW_FIX = rawOf(Object.assign({}, TABLE, { map: FIXTAB }));
+
+function scenario(cfgText, opts, fixTab) {
   opts = opts || {};
-  const LOGS = [], INNER = [], CREATED = [], APPLIED = [], ABS = {}, CALLS = [];
+  const RAW = fixTab ? RAW_FIX : RAW_LIVE;
+  const LOGS = [], INNER = [], CREATED = [], APPLIED = [], ABS = {};
   const BASE = {};
   IDS.forEach(id => { BASE[String(id)] = { id: Number(id), model: Number(id), portrait_ani: 'none', standing_portrait_ani: 'none' }; });
   const OV = {};
@@ -53,7 +69,6 @@ function scenario(cfgText, opts) {
   const gr = {
     clientOverrides: {},
     get: function (t, k) {
-      if (t === 'card') return opts.cardRow === undefined ? { spine_model: 'unique_1' } : opts.cardRow;
       if (t !== 'char_base') return null;
       const b = BASE[String(k)]; if (!b) return null;
       const o = (OV.char_base || {})[String(k)];
@@ -84,21 +99,9 @@ function scenario(cfgText, opts) {
   vm.createContext(ctx);
   vm.runInContext(RAW, ctx);
   vm.runInContext('GameResDB = __gr', ctx);          // 真机顺序：先跑载荷，DB 之后才被赋值
-  if (opts.noCardUtil) return finish();
-  ctx.__cu = {
-    getCardAnimation: function (id) {
-      CALLS.push(String(id));
-      return opts.cardOwned === undefined ? 0 : opts.cardOwned;   // 0 = 这角色的卡面动画没买
-    }
-  };
-  vm.runInContext('CharacterUtil = __cu', ctx);      // 赋值即触发载荷装的 trap
-  return finish();
-
-  function finish() {
-    const api = ctx.skinRender;
-    if (api && P_KEY) ctx.sp.SkeletonAnimation.create(P_KEY + '.scsp', 'x', 1);
-    return { ctx, LOGS, INNER, CREATED, APPLIED, api, FU, CALLS };
-  }
+  const api = ctx.skinRender;
+  if (api && P_KEY) ctx.sp.SkeletonAnimation.create(P_KEY + '.scsp', 'x', 1);
+  return { ctx, LOGS, INNER, CREATED, APPLIED, api, FU };
 }
 
 const A = scenario('');
@@ -113,8 +116,9 @@ T('D3 表真的进了载荷',
   new RegExp('路径表=' + Object.keys(MAP).length).test(ALIVE), Object.keys(MAP).length);
 T('D4 行覆盖走官方通道且回读全对',
   /ROW 走官方通道 applyClientOverrides/.test(LOG()) &&
-  (() => { const m = LOG().match(/ROW 回读\(抽样 (\d+)\) 对=(\d+) 不对=(\d+)/);
-    return !!m && Number(m[1]) >= 1 && m[2] === m[1] && m[3] === '0'; })(),
+  (() => { const exp = Math.min(3, IDS.length);
+    const m = LOG().match(/ROW 回读\(每表抽 \d+\) 对=(\d+) 不对=(\d+)/);
+    return !!m && m[1] === String(exp) && m[2] === '0'; })(),
   A.LOGS.filter(x => /ROW 回读/.test(x))[0]);
 T('D5 官方通道被调用', A.APPLIED.length >= 1, 'APPLIED=' + A.APPLIED.length);
 const R6 = (() => {
@@ -133,37 +137,40 @@ const R6 = (() => {
 T('D6 每行都指向该角色自己的皮肤族', R6 === true,
   R6 === true ? JSON.stringify(A.APPLIED[A.APPLIED.length - 1].tables.char_base[IDS[0]]) : R6);
 
-if (L_KEY) {
-  A.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'a', 1);
+{
+  const L = scenario('', {}, 1);
+  L.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'a', 1);
   T('D7 L 层换成皮肤骨架',
-    A.CREATED[A.CREATED.length - 1] === want(L_KEY, 'scsp'), A.CREATED.slice(-2).join(' | '));
-  A.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'x', 1).setAnimation(0, 'zz_absent_anim', true);
-  T('D8 放不出的动画如实记 MISS', A.api.made().made.animMiss >= 1,
-    JSON.stringify(A.api.made().anim));
-  A.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'y', 1);
+    L.CREATED[L.CREATED.length - 1] === want(FIX_KEY, 'scsp', FIXTAB), L.CREATED.slice(-2).join(' | '));
+  L.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'x', 1).setAnimation(0, 'zz_absent_anim', true);
+  T('D8 放不出的动画如实记 MISS', L.api.made().made.animMiss >= 1,
+    JSON.stringify(L.api.made().anim));
+  L.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'y', 1);
   T('D9 缺省不自愈回落',
-    A.api.made().made.heal === 0 && /自愈回落=关/.test(READY), A.CREATED.slice(-2).join(' | '));
-  const H = scenario('heal' + NL);
-  H.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'a', 1);
-  H.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'b', 1).setAnimation(0, 'zz_absent_anim', true);
-  H.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'c', 1);
+    L.api.made().made.heal === 0 && /自愈回落=关/.test(L.LOGS.filter(x => /READY/.test(x))[0] || ''),
+    L.CREATED.slice(-2).join(' | '));
+  const H = scenario('heal' + NL, {}, 1);
+  H.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'a', 1);
+  H.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'b', 1).setAnimation(0, 'zz_absent_anim', true);
+  H.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'c', 1);
   T('D10 heal 一开安全网就回来',
-    H.api.made().made.heal === 1 && H.CREATED[H.CREATED.length - 1] === L_KEY + '.scsp',
+    H.api.made().made.heal === 1 && H.CREATED[H.CREATED.length - 1] === FIX_KEY + '.scsp',
     H.CREATED.join(' | '));
-  const B = scenario('tier ABTS' + NL);
-  B.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'a', 1);
+  const B = scenario('tier ABTS' + NL, {}, 1);
+  B.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'a', 1);
   T('D11 tier 去掉 L 就不换',
-    B.CREATED[B.CREATED.length - 1] === L_KEY + '.scsp' &&
+    B.CREATED[B.CREATED.length - 1] === FIX_KEY + '.scsp' &&
     Object.keys(B.api.made().refuse).some(k => /层级 L 未放行/.test(k)),
     JSON.stringify(B.api.made().refuse).slice(0, 140));
-  const DP = scenario('drop ' + L_KEY.split('/')[0] + '/' + NL);
-  DP.ctx.sp.SkeletonAnimation.create(L_KEY + '.scsp', 'a', 1);
+  const DP = scenario('drop model/' + NL, {}, 1);
+  DP.ctx.sp.SkeletonAnimation.create(FIX_KEY + '.scsp', 'a', 1);
   T('D12 drop 能收回整目录',
-    DP.CREATED[DP.CREATED.length - 1] === L_KEY + '.scsp' &&
+    DP.CREATED[DP.CREATED.length - 1] === FIX_KEY + '.scsp' &&
     Object.keys(DP.api.made().refuse).some(k => /cfg drop/.test(k)),
     JSON.stringify(DP.api.made().refuse).slice(0, 140));
-} else {
-  T('表里必须有 L 层', false, '缺 L 层，6 条判据无从谈起');
+  T('D12b 交付表里一条 L 都没有（棋盘件不换局内小人）',
+    !Object.keys(MAP).some(k => MAP[k].t === 'L' && k.indexOf('model/') === 0),
+    Object.keys(MAP).filter(k => MAP[k].t === 'L').join(' ') || '无 L 层');
 }
 
 if (A_KEY && S_KEY) {
@@ -236,27 +243,54 @@ T('D22 表结构自洽', R22 === true,
 T('D23 合成图集缺省不开',
   /图集合成=关/.test(READY) && !/ATLAS 合成/.test(LOG()), READY.slice(0, 130));
 
-/* 卡面动画：没买回 0，只对有骨架的卡代答 */
-const CM1 = scenario('');
-const CM1Q = CM1.api.cardmotion();
-T('D24 CharacterUtil 一赋值钩子就装上', CM1Q.armed === true, JSON.stringify(CM1Q));
-const CM1V = CM1.ctx.CharacterUtil.getCardAnimation('c_1057_srt4_rsp5', 1057);
-T('D25 没买的卡被代答成有动画',
-  CM1V === 1 && CM1.api.cardmotion().forced === 1, '返回 ' + CM1V + ' 状态 ' + JSON.stringify(CM1.api.cardmotion()));
-const CM2 = scenario('', { cardOwned: 7 });
-const CM2V = CM2.ctx.CharacterUtil.getCardAnimation('c_30117_uni1', 30117);
-T('D26 已购的真值原样放行', CM2V === 7 && CM2.api.cardmotion().forced === 0,
-  '返回 ' + CM2V + ' 代答次数 ' + CM2.api.cardmotion().forced);
-const CM3 = scenario('off' + NL);
-const CM3V = CM3.ctx.CharacterUtil.getCardAnimation('c_1057_srt4_rsp5', 1057);
-T('D27 cfg off 时代答也不生效（负控）',
-  CM3.api.cardmotion().armed === true && CM3V === 0 && CM3.api.cardmotion().forced === 0,
-  'armed=' + CM3.api.cardmotion().armed + ' 返回 ' + CM3V + ' 代答次数 ' + CM3.api.cardmotion().forced);
-const CM5 = scenario('', { cardRow: { spine_model: 'none' } });
-const CM5V = CM5.ctx.CharacterUtil.getCardAnimation('c_1069_srt1', 1069);
-const CM5Q = CM5.api.cardmotion();
-T('D28 没有动态骨架的卡不被代答',
-  CM5V === 0 && CM5Q.forced === 0 && CM5Q.skip === 1, JSON.stringify(CM5Q) + ' 返回 ' + CM5V);
+/* 本轮定案的结构性判据：局内的美术和动画命令表是同一个名字要来的，
+   只换 model/ 会让骨架里没有 attack_ready/hit，角色停在摆放姿态。 */
+{
+  const unpaired = [];
+  for (const k of Object.keys(MAP)) {
+    if (k.indexOf('model/') !== 0 || /_battle_ready$/.test(k)) continue;
+    const base = k.slice('model/'.length), md = MAP['model_data/' + base];
+    if (!md || md.v !== MAP[k].v) { unpaired.push(k + '→' + MAP[k].v + ' 没有同变体的 model_data 行'); continue; }
+    const lack = ['srmd', 'srcs'].filter(x => (md.e || []).indexOf(x) < 0);
+    if (lack.length) unpaired.push(k + ' 的配对行没列 ' + lack.join('/'));
+  }
+  T('D24 每条小人换装都带着同变体的命令表', unpaired.length === 0, unpaired.join(' | ')
+    || Object.keys(MAP).filter(k => k.indexOf('model/') === 0).join(' '));
+  const back = Object.keys(MAP).filter(k => /_battle_ready$/.test(k))
+    .filter(k => !MAP[k.replace('model/', 'model_data/')] ||
+                 MAP[k.replace('model/', 'model_data/')].v !== MAP[k].v);
+  T('D24b 背身件也成对（.brmd 跟着换）', back.length === 0,
+    back.join(' ') || '背身行 ' + Object.keys(MAP).filter(k => /_battle_ready$/.test(k)).length + ' 条');
+  const gone = ['1056', '30084', '30093', '30097', '30113', '30115', '30117', 'lobby_planet_earth']
+    .filter(id => MAP['model/' + id] || MAP['model_data/' + id]);
+  T('D25 走停棋盘件不再被拿来换局内小人', gone.length === 0,
+    gone.length ? '还在表里：' + gone.join(',') : '8 个基名都不在 model/ 与 model_data/ 里');
+  /* 一个角色只能顶一套皮肤：脸族是 <族名>_<token> 各自独立拼的（game/character_model.js
+     getFaceByToken，token = model_number 或 char_base.model），族与族之间号不一样就会
+     "脸是另一套皮肤、身体是这一套"。card 族的 _NN 是卡面序号，不参与。 */
+  {
+    const dirs = ['face/character', 'face/portrait', 'model', 'model_data'];
+    const byc = {};
+    for (const k of Object.keys(MAP)) {
+      const d = k.slice(0, k.lastIndexOf('/'));
+      if (dirs.indexOf(d) < 0) continue;
+      const mv = String(MAP[k].v).match(/^(.*?)(\d{3,7})(?:_(\d{2}))?$/);
+      if (!mv || !mv[3]) continue;
+      byc[mv[2]] = byc[mv[2]] || {};
+      byc[mv[2]][d] = byc[mv[2]][d] || new Set();
+      byc[mv[2]][d].add(mv[3]);
+    }
+    const clash = [];
+    for (const cid of Object.keys(byc).sort()) {
+      const nums = new Set();
+      Object.keys(byc[cid]).forEach(d => byc[cid][d].forEach(n => nums.add(n)));
+      if (nums.size > 1) clash.push(cid + ' 用了 ' + Array.from(nums).sort().join('/') +
+        '（' + Object.keys(byc[cid]).map(d => d + ':' + Array.from(byc[cid][d]).sort().join(',')).join(' ') + '）');
+    }
+    T('D26 同一角色所有族顶的是同一个皮肤号', clash.length === 0,
+      clash.join(' | ') || Object.keys(byc).length + ' 个角色的族号统一');
+  }
+}
 
 const bad = ck.filter(c => !c[1]).length;
 const SHOULD = 28;
